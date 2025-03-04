@@ -10,68 +10,67 @@ import RealityKit
 import ARKit
 import CoreHaptics
 import AVFoundation
+import Combine
 
 struct ContentView: View {
-    @State var distance: Float = 0.0
-    @State var navigationDirection: String = "clear"
+    @StateObject var depthManager = DepthManager()
     @State private var engine: CHHapticEngine?
     @State private var lastHapticTime = Date()
-    @State private var proximity: Double = 0.0
+    @State private var lastBeepTime = Date()
     @State private var speechSynthesizer = AVSpeechSynthesizer()
-    
+    @State private var audioPlayer: AVAudioPlayer?
+    @State private var beepBaseFrequency: Double = 440
     var body: some View {
         ZStack {
-            ARViewContainer(distance: $distance, navigationDirection: $navigationDirection, proximity: $proximity)
+            ARViewContainer(depthManager: depthManager)
                 .edgesIgnoringSafeArea(.all)
             
-            Text(navigationDirection)
+            Text(depthManager.statusDescription)
                 .foregroundColor(.clear)
-                .accessibilityLabel(accessibilityMessage)
+                .accessibilityLabel(depthManager.accessibilityDescription)
         }
         .onAppear(perform: prepareHaptics)
-        .onChange(of: navigationDirection) { _, newValue in
-            handleNavigationFeedback(for: newValue)
+        .onReceive(depthManager.$statusUpdate) { _ in
+            handleNavigationFeedback()
         }
-    }
-    
-    private var accessibilityMessage: String {
-        if distance == 0 {
-            return "Path clear, move forward confidently"
-        }
-        return "Navigation instruction: \(navigationDirection)"
     }
 
     func prepareHaptics() {
-        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return }
-        
         do {
-            engine = try CHHapticEngine()
-            try engine?.start()
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try AVAudioSession.sharedInstance().setActive(true)
+            
+            if CHHapticEngine.capabilitiesForHardware().supportsHaptics {
+                engine = try CHHapticEngine()
+                try engine?.start()
+            }
         } catch {
-            print("Haptic engine error: \(error)")
+            print("Initialization error: \(error)")
         }
     }
     
-    func handleNavigationFeedback(for direction: String) {
-        guard distance > 0 else { return }
+    func handleNavigationFeedback() {
+        guard depthManager.closestDistance < 20 else { return }
         
-        speakNavigationInstruction()
-        provideHapticGuidance()
+        if depthManager.closestDistance < 0.5 {
+            provideProximityHapticAndBeep()
+        } else {
+            speakNavigationInstruction()
+            provideHapticGuidance()
+        }
     }
     
     private func speakNavigationInstruction() {
+        guard depthManager.closestDistance >= 0.5 else { return }
+        
         let message: String
-        switch navigationDirection {
-        case "turnRight":
-            message = "Obstacle on left, turn right"
-        case "turnLeft":
-            message = "Obstacle on right, turn left"
-        case "caution":
-            message = String(format: "Caution: obstacle %.1f meters ahead", distance)
-        case "stop":
-            message = "Immediate obstacle, stop and check surroundings"
+        switch depthManager.status {
+        case .caution:
+            message = String(format: "", depthManager.closestDistance)
+        case .stop:
+            message = ""
         default:
-            message = "Path clear, proceed forward"
+            message = ""
         }
         
         let utterance = AVSpeechUtterance(string: message)
@@ -84,44 +83,26 @@ struct ContentView: View {
         guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return }
         
         let currentTime = Date()
-        let minInterval = calculateMinInterval()
+        let minInterval = max(0.15, 0.3 - (depthManager.proximity * 0.25))
         
         var events = [CHHapticEvent]()
         let intensity = CHHapticEventParameter(
             parameterID: .hapticIntensity,
-            value: Float(max(0.4, proximity * 1.8))
-        )
+            value: Float(max(0.4, depthManager.proximity * 1.8)))
         
         let sharpness = CHHapticEventParameter(
             parameterID: .hapticSharpness,
-            value: 0.8
-        )
+            value: 0.8)
         
-        switch navigationDirection {
-        case "turnRight":
-            events.append(createTransientEvent(intensity: 1.0, sharpness: 1.0))
-            events.append(createContinuousEvent(
-                intensity: intensity,
-                sharpness: sharpness,
-                duration: 0.3
-            ))
-            
-        case "turnLeft":
-            events.append(createTransientEvent(intensity: 1.0, sharpness: 1.0))
-            events.append(createContinuousEvent(
-                intensity: intensity,
-                sharpness: sharpness,
-                duration: 0.3
-            ))
-            
-        case "caution":
+        switch depthManager.status {
+        case .caution:
             events.append(createContinuousEvent(
                 intensity: intensity,
                 sharpness: sharpness,
                 duration: 0.5
             ))
             
-        case "stop":
+        case .stop:
             events.append(createTransientEvent(intensity: 1.0, sharpness: 1.0))
             events.append(createTransientEvent(
                 intensity: 1.0,
@@ -139,8 +120,52 @@ struct ContentView: View {
         playHapticPattern(events: events)
     }
     
-    private func calculateMinInterval() -> TimeInterval {
-        max(0.15, 0.3 - (proximity * 0.25))
+    private func provideProximityHapticAndBeep() {
+        let currentTime = Date()
+        let proximity = depthManager.proximity
+        
+        // Dynamic beep parameters
+        let beepInterval = max(0.05, 1.0 - (proximity * 0.95))
+        let volume = Float(min(1.0, proximity * 1.5))
+        
+        // Haptic feedback
+        let hapticIntensity = Float(proximity)
+        let hapticSharpness: Float = 0.8
+        
+        if currentTime.timeIntervalSince(lastHapticTime) > 0.1 {
+            let event = createContinuousEvent(
+                intensity: CHHapticEventParameter(
+                    parameterID: .hapticIntensity,
+                    value: hapticIntensity
+                ),
+                sharpness: CHHapticEventParameter(
+                    parameterID: .hapticSharpness,
+                    value: hapticSharpness
+                ),
+                duration: 0.3
+            )
+            playHapticPattern(events: [event])
+        }
+        
+        // Play beep with dynamic properties
+        if currentTime.timeIntervalSince(lastBeepTime) > beepInterval {
+            playBeepSound(volume: volume, rate: Float(1.0 + proximity))
+            lastBeepTime = currentTime
+        }
+    }
+    
+    private func playBeepSound(volume: Float, rate: Float) {
+        guard let url = Bundle.main.url(forResource: "beep", withExtension: "wav") else { return }
+        
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: url)
+            audioPlayer?.volume = volume
+            audioPlayer?.enableRate = true
+            audioPlayer?.rate = rate
+            audioPlayer?.play()
+        } catch {
+            print("Error playing beep: \(error)")
+        }
     }
     
     private func createContinuousEvent(intensity: CHHapticEventParameter,
@@ -179,125 +204,133 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Depth Manager
+class DepthManager: ObservableObject {
+    @Published var statusUpdate = UUID()
+    @Published var closestDistance: Float = 0.0
+    @Published var status: NavigationStatus = .clear
+    @Published var proximity: Double = 0.0
+    
+    enum NavigationStatus: String {
+        case clear, caution, stop
+    }
+    
+    var statusDescription: String {
+        status.rawValue
+    }
+    
+    var accessibilityDescription: String {
+        switch status {
+        case .clear: return ""
+        case .caution: return ""
+        case .stop: return ""
+        }
+    }
+    
+    func setupARSession(_ session: ARSession) {
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.sceneReconstruction = .meshWithClassification
+        configuration.frameSemantics = [.smoothedSceneDepth, .sceneDepth]
+        
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+            configuration.frameSemantics.insert(.personSegmentationWithDepth)
+        }
+        
+        session.run(configuration)
+    }
+    
+    func processDepth(_ frame: ARFrame) {
+        guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
+        let depthMap = depthData.depthMap
+        
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+        
+        guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else { return }
+        let floatData = baseAddress.assumingMemoryBound(to: Float32.self)
+        
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        var minDistance: Float = .greatestFiniteMagnitude
+        
+        let yRange = max(0, height/2 - 50)...min(height-1, height/2 + 50)
+        let xRange = max(0, width/2 - 50)...min(width-1, width/2 + 50)
+        
+        for y in yRange {
+            for x in xRange {
+                let index = y * width + x
+                let distance = floatData[index]
+                if distance > 0 && distance < minDistance {
+                    minDistance = distance
+                }
+            }
+        }
+        
+        DispatchQueue.main.async {
+            self.updateStatus(with: minDistance != .greatestFiniteMagnitude ? minDistance : 10.0)
+        }
+    }
+    
+    private func updateStatus(with distance: Float) {
+        closestDistance = distance
+        proximity = Double(max(0, min(1, 1 - (distance / 1.5))))
+        
+        switch distance {
+        case ..<0.3: status = .stop
+        case 0.3..<1.0: status = .caution
+        default: status = .clear
+        }
+        
+        statusUpdate = UUID()
+    }
+}
+
+// MARK: - AR View Container
 struct ARViewContainer: UIViewRepresentable {
-    @Binding var distance: Float
-    @Binding var navigationDirection: String
-    @Binding var proximity: Double
+    @ObservedObject var depthManager: DepthManager
     
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
-        let config = ARWorldTrackingConfiguration()
-        config.planeDetection = [.horizontal, .vertical]
-        arView.session.run(config)
+        depthManager.setupARSession(arView.session)
         arView.session.delegate = context.coordinator
+        arView.environment.sceneUnderstanding.options = [.occlusion]
         return arView
     }
     
     func updateUIView(_ uiView: ARView, context: Context) {}
     
     func makeCoordinator() -> Coordinator {
-        Coordinator(
-            distance: $distance,
-            navigationDirection: $navigationDirection,
-            proximity: $proximity
-        )
+        Coordinator(depthManager: depthManager)
     }
     
     class Coordinator: NSObject, ARSessionDelegate {
-        @Binding var distance: Float
-        @Binding var navigationDirection: String
-        @Binding var proximity: Double
-        private var distanceBuffer = [Float]()
+        let depthManager: DepthManager
         
-        init(distance: Binding<Float>, navigationDirection: Binding<String>, proximity: Binding<Double>) {
-            _distance = distance
-            _navigationDirection = navigationDirection
-            _proximity = proximity
+        init(depthManager: DepthManager) {
+            self.depthManager = depthManager
         }
         
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            let raycastQuery = ARRaycastQuery(
-                origin: frame.camera.transform.translation,
-                direction: frame.camera.transform.forwardVector,
-                allowing: .existingPlaneInfinite,
-                alignment: .any
-            )
-            
-            let results = session.raycast(raycastQuery)
-            
-            DispatchQueue.main.async {
-                guard let firstResult = results.first else {
-                    self.handleNoDetection()
-                    return
-                }
-                
-                let cameraTransform = frame.camera.transform
-                let targetPosition = firstResult.worldTransform.translation
-                let cameraPosition = cameraTransform.translation
-                let rawDistance = simd_distance(cameraPosition, targetPosition)
-                
-                self.distanceBuffer.append(rawDistance)
-                self.distanceBuffer = Array(self.distanceBuffer.suffix(10))
-                
-                let smoothedDistance = self.distanceBuffer.reduce(0, +) / Float(self.distanceBuffer.count)
-                self.proximity = Double(max(0, min(1, 1 - (smoothedDistance / 1.5))))
-                self.distance = smoothedDistance
-                
-                let toTarget = targetPosition - cameraPosition
-                let cameraForward = normalize(cameraTransform.forwardVector)
-                let cameraRight = normalize(cameraTransform.rightVector)
-                
-                let crossProduct = cross(normalize(toTarget), cameraForward)
-                let lateralBias = dot(crossProduct, cameraRight)
-                
-                let turnThreshold: Float = 0.2
-                let stopThreshold: Float = 0.7
-                
-                if smoothedDistance < 1.5 {
-                    if lateralBias > turnThreshold {
-                        self.navigationDirection = "turnLeft"
-                    } else if lateralBias < -turnThreshold {
-                        self.navigationDirection = "turnRight"
-                    } else if abs(lateralBias) > stopThreshold {
-                        self.navigationDirection = "stop"
-                    } else {
-                        self.navigationDirection = smoothedDistance < 1.0 ? "caution" : "far"
-                    }
-                } else {
-                    self.navigationDirection = "clear"
-                }
-            }
+            depthManager.processDepth(frame)
         }
         
-        private func handleNoDetection() {
-            self.distance = 0
-            self.proximity = 0
-            self.navigationDirection = "clear"
+        func session(_ session: ARSession, didFailWithError error: Error) {
+            print("AR Session Failed: \(error.localizedDescription)")
+        }
+        
+        func sessionWasInterrupted(_ session: ARSession) {
+            print("AR Session Interrupted")
+        }
+        
+        func sessionInterruptionEnded(_ session: ARSession) {
+            print("AR Session Resumed")
+            session.run(session.configuration!)
         }
     }
 }
 
-// MARK: - SIMD Extensions
-extension float4x4 {
-    var translation: SIMD3<Float> {
-        return columns.3.xyz
-    }
-    
-    var forwardVector: SIMD3<Float> {
-        return normalize(-columns.2.xyz)
-    }
-    
-    var rightVector: SIMD3<Float> {
-        return normalize(columns.0.xyz)
-    }
-}
-
-extension simd_float4 {
-    var xyz: SIMD3<Float> {
-        return SIMD3(x, y, z)
-    }
-}
 
 #Preview {
     ContentView()
 }
+
