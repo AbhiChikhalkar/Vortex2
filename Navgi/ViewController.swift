@@ -5,7 +5,6 @@
 //  Created by Abhishek Chikhalkar on 07/03/25.
 //
 
-
 import UIKit
 import ARKit
 import RealityKit
@@ -21,38 +20,53 @@ class ViewController: UIViewController {
     
     override func viewDidLoad() {
         super.viewDidLoad()
+        view.backgroundColor = .black
         setupARView()
         setupUI()
         setupManagers()
     }
     
     private func setupARView() {
-        arView.frame = view.bounds
-        arView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        arView.removeFromSuperview()
+        arView.translatesAutoresizingMaskIntoConstraints = false
+        
+        // Enable camera feed
+        arView.renderOptions = [.disableDepthOfField, .disableMotionBlur]
+        arView.environment.sceneUnderstanding.options.insert(.occlusion)
+        
         view.addSubview(arView)
+        
+        NSLayoutConstraint.activate([
+            arView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            arView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            arView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            arView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.5)
+        ])
+        
+        // Transparent background to show camera feed
+        arView.backgroundColor = .clear
     }
     
     private func setupUI() {
+        statusLabel.text = "Initializing..."
         statusLabel.textColor = .white
         statusLabel.font = .systemFont(ofSize: 24, weight: .bold)
         statusLabel.textAlignment = .center
-        statusLabel.backgroundColor = .black.withAlphaComponent(0.6)
-        statusLabel.layer.cornerRadius = 8
-        statusLabel.clipsToBounds = true
+        statusLabel.numberOfLines = 2
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         
         view.addSubview(statusLabel)
         NSLayoutConstraint.activate([
-            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 20),
+            statusLabel.topAnchor.constraint(equalTo: arView.bottomAnchor, constant: 20),
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            statusLabel.heightAnchor.constraint(equalToConstant: 50)
+            statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20)
         ])
     }
     
     private func setupManagers() {
-        depthManager.delegate = self
         ARManager.shared.setupARSession(arView.session)
+        depthManager.delegate = self
         hapticManager.prepare()
     }
 }
