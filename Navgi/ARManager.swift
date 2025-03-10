@@ -2,20 +2,27 @@
 //  ARManager.swift
 //  Navgi
 //
-import ARKit
-import RealityKit
+//  Created by Abhishek Chikhalkar on 07/03/25.
+//
 
-class ARManager: NSObject, ObservableObject {
-    @Published var statusText = "Initializing..."
+
+
+
+import ARKit
+
+class ARManager: ObservableObject {
+    static let shared = ARManager()
+    private init() {}
     
     func setupARSession(_ session: ARSession) {
-        let configuration = ARWorldTrackingConfiguration()
-        configuration.sceneReconstruction = .meshWithClassification
-        
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            configuration.frameSemantics.insert(.sceneDepth)
+        let configuration = ARWorldTrackingConfiguration().then {
+            $0.sceneReconstruction = [.meshWithClassification]
+            $0.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
+            
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+                $0.frameSemantics.insert(.personSegmentationWithDepth)
+            }
         }
-        
         session.run(configuration)
     }
 }

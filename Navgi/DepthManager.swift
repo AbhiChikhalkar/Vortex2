@@ -1,43 +1,35 @@
-// DepthManager.swift
-import ARKit
-import Combine
+//
+//  DepthManager.swift
+//  Navgi
+//
+//  Created by Abhishek Chikhalkar on 07/03/25.
+//
 
-class DepthManager: NSObject {
+
+import ARKit
+
+protocol DepthManagerDelegate: AnyObject {
+    func didUpdateStatus(_ status: String)
+    func handleFeedback(forDistance distance: Float)
+}
+
+class DepthManager: NSObject, ARSessionDelegate, ObservableObject {
+    static let shared = DepthManager()
+    private override init() {}
     
-    // MARK: - Properties
-    var onStatusUpdate: (() -> Void)?
-    var closestDistance: Float = 0.0
-    var status: NavigationStatus = .clear
-    var proximity: Double = 0.0
+    weak var delegate: DepthManagerDelegate?
+    @Published var closestDistance: Float = 0.0
+    @Published var proximity: Double = 0.0
+    @Published var statusDescription: String = "Clear path"
     
-    // MARK: - Private Properties
-    private var statusUpdate = PassthroughSubject<Void, Never>()
-    private var distanceBuffer = [Float]()
+    enum NavigationStatus { case clear, caution, stop }
+    private(set) var status: NavigationStatus = .clear
     
-    // MARK: - Enums
-    enum NavigationStatus: String {
-        case clear, caution, stop
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        processDepth(frame)
     }
     
-    // MARK: - Computed Properties
-    var statusDescription: String {
-        status.rawValue
-    }
-    
-    // MARK: - Public Methods
-    func setupARSession(_ session: ARSession) {
-        let configuration = ARWorldTrackingConfiguration()
-        configuration.sceneReconstruction = .meshWithClassification
-        configuration.frameSemantics = [.smoothedSceneDepth, .sceneDepth]
-        
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
-            configuration.frameSemantics.insert(.personSegmentationWithDepth)
-        }
-        
-        session.run(configuration)
-    }
-    
-    func processDepth(_ frame: ARFrame) {
+    private func processDepth(_ frame: ARFrame) {
         guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
         let depthMap = depthData.depthMap
         
@@ -47,39 +39,41 @@ class DepthManager: NSObject {
         guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else { return }
         let floatData = baseAddress.assumingMemoryBound(to: Float32.self)
         
-        let width = CVPixelBufferGetWidth(depthMap)
-        let height = CVPixelBufferGetHeight(depthMap)
+        let (width, height) = (CVPixelBufferGetWidth(depthMap), CVPixelBufferGetHeight(depthMap))
         var minDistance: Float = .greatestFiniteMagnitude
         
-        let yRange = max(0, height/2 - 50)...min(height-1, height/2 + 50)
-        let xRange = max(0, width/2 - 50)...min(width-1, width/2 + 50)
-        
-        for y in yRange {
-            for x in xRange {
-                let index = y * width + x
-                let distance = floatData[index]
+        // Sample center region
+        for y in (height/2-30)...(height/2+30) {
+            for x in (width/2-30)...(width/2+30) {
+                let distance = floatData[y * width + x]
                 if distance > 0 && distance < minDistance {
                     minDistance = distance
                 }
             }
         }
         
-        DispatchQueue.main.async {
-            self.updateStatus(with: minDistance != .greatestFiniteMagnitude ? minDistance : 10.0)
-        }
+        updateStatus(with: minDistance.isFinite ? minDistance : 10.0)
+        delegate?.handleFeedback(forDistance: minDistance)
     }
     
-    // MARK: - Private Methods
     private func updateStatus(with distance: Float) {
         closestDistance = distance
-        proximity = Double(max(0, min(1, 1 - (distance / 1.5)))
+        proximity = Double(max(0, min(1, 1 - (distance / 1.5))))
         
-        switch distance {
-        case ..<0.3: status = .stop
-        case 0.3..<1.0: status = .caution
-        default: status = .clear
-        }
+        status = {
+            switch distance {
+            case ..<0.3: return .stop
+            case 0.3..<1.0: return .caution
+            default: return .clear
+            }
+        }()
         
-        onStatusUpdate?()
+        statusDescription = {
+            switch status {
+            case .stop: return "STOP! \(String(format: "%.1f", distance))m"
+            case .caution: return "Caution: \(String(format: "%.1f", distance))m"
+            case .clear: return "Clear path"
+            }
+        }()
     }
 }

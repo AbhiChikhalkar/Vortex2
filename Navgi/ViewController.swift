@@ -1,50 +1,31 @@
-// ViewController.swift
+//
+//  ViewController.swift
+//  Navgi
+//
+//  Created by Abhishek Chikhalkar on 07/03/25.
+//
+
+
 import UIKit
-import RealityKit
 import ARKit
-import CoreHaptics
-import AVFoundation
+import RealityKit
 
 class ViewController: UIViewController {
-    
-    // MARK: - UI Components
     private let arView = ARView()
-    private let statusLabel: UILabel = {
-        let label = UILabel()
-        label.textColor = .white
-        label.textAlignment = .center
-        label.font = UIFont.preferredFont(forTextStyle: .title1)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }()
-    
-    // MARK: - Properties
-    private let depthManager = DepthManager()
-    private var engine: CHHapticEngine?
+    private let statusLabel = UILabel()
+    private let depthManager = DepthManager.shared
+    private let hapticManager = HapticManager.shared
+    private let audioManager = AudioManager.shared
     private var lastHapticTime = Date()
     private var lastBeepTime = Date()
-    private var audioPlayer: AVAudioPlayer?
     
-    // MARK: - Lifecycle
     override func viewDidLoad() {
         super.viewDidLoad()
         setupARView()
         setupUI()
-        prepareHaptics()
-        setupDepthManager()
+        setupManagers()
     }
     
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        startARSession()
-    }
-    
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        arView.session.pause()
-    }
-    
-    // MARK: - Setup
     private func setupARView() {
         arView.frame = view.bounds
         arView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -52,127 +33,65 @@ class ViewController: UIViewController {
     }
     
     private func setupUI() {
+        statusLabel.textColor = .white
+        statusLabel.font = .systemFont(ofSize: 24, weight: .bold)
+        statusLabel.textAlignment = .center
+        statusLabel.backgroundColor = .black.withAlphaComponent(0.6)
+        statusLabel.layer.cornerRadius = 8
+        statusLabel.clipsToBounds = true
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        
         view.addSubview(statusLabel)
         NSLayoutConstraint.activate([
             statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 20),
-            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            statusLabel.heightAnchor.constraint(equalToConstant: 50)
         ])
     }
     
-    private func setupDepthManager() {
-        depthManager.onStatusUpdate = { [weak self] in
-            self?.handleNavigationFeedback()
-            self?.statusLabel.text = self?.depthManager.statusDescription
+    private func setupManagers() {
+        depthManager.delegate = self
+        ARManager.shared.setupARSession(arView.session)
+        hapticManager.prepare()
+    }
+}
+
+extension ViewController: DepthManagerDelegate {
+    func didUpdateStatus(_ status: String) {
+        DispatchQueue.main.async {
+            self.statusLabel.text = status
         }
     }
     
-    private func startARSession() {
-        let configuration = ARWorldTrackingConfiguration()
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            configuration.frameSemantics.insert(.sceneDepth)
-        }
-        arView.session.run(configuration)
-    }
-    
-    // MARK: - Haptics & Audio
-    private func prepareHaptics() {
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playback)
-            try AVAudioSession.sharedInstance().setActive(true)
-            
-            if CHHapticEngine.capabilitiesForHardware().supportsHaptics {
-                engine = try CHHapticEngine()
-                try engine?.start()
-            }
-        } catch {
-            print("Initialization error: \(error)")
-        }
-    }
-    
-    private func handleNavigationFeedback() {
-        guard depthManager.closestDistance < 20 else { return }
-        
-        if depthManager.closestDistance < 0.5 {
-            provideProximityHapticAndBeep()
-        }
-    }
-    
-    private func provideProximityHapticAndBeep() {
+    func handleFeedback(forDistance distance: Float) {
         let currentTime = Date()
         let proximity = depthManager.proximity
         
-        // Dynamic beep parameters
-        let beepInterval = max(0.05, 1.0 - (proximity * 0.95))
-        let volume = Float(min(1.0, proximity * 1.5))
-        
-        // Haptic feedback
-        let hapticIntensity = Float(proximity)
-        let hapticSharpness: Float = 0.8
-        
+        if distance < 0.5 {
+            handleProximityFeedback(currentTime: currentTime, proximity: proximity)
+        } else {
+            handleGuidanceFeedback(currentTime: currentTime, proximity: proximity)
+        }
+    }
+    
+    private func handleProximityFeedback(currentTime: Date, proximity: Double) {
         if currentTime.timeIntervalSince(lastHapticTime) > 0.1 {
-            let event = createContinuousEvent(
-                intensity: CHHapticEventParameter(
-                    parameterID: .hapticIntensity,
-                    value: hapticIntensity
-                ),
-                sharpness: CHHapticEventParameter(
-                    parameterID: .hapticSharpness,
-                    value: hapticSharpness
-                ),
-                duration: 0.3
-            )
-            playHapticPattern(events: [event])
+            hapticManager.playContinuousHaptic(intensity: Float(proximity), sharpness: 0.8)
+            lastHapticTime = currentTime
         }
         
+        let beepInterval = max(0.05, 1.0 - (proximity * 0.95))
         if currentTime.timeIntervalSince(lastBeepTime) > beepInterval {
-            playBeepSound(volume: volume, rate: Float(1.0 + proximity))
+            audioManager.playBeep(volume: Float(proximity), rate: Float(1.0 + proximity))
             lastBeepTime = currentTime
         }
     }
     
-    private func playBeepSound(volume: Float, rate: Float) {
-        guard let url = Bundle.main.url(forResource: "beep", withExtension: "wav") else {
-            print("Beep sound file not found")
-            return
-        }
-        
-        do {
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.volume = volume
-            audioPlayer?.enableRate = true
-            audioPlayer?.rate = rate
-            audioPlayer?.play()
-        } catch {
-            print("Error playing beep: \(error)")
-        }
-    }
-    
-    private func createContinuousEvent(intensity: CHHapticEventParameter,
-                                      sharpness: CHHapticEventParameter,
-                                      duration: Double) -> CHHapticEvent {
-        CHHapticEvent(
-            eventType: .hapticContinuous,
-            parameters: [intensity, sharpness],
-            relativeTime: 0,
-            duration: duration
-        )
-    }
-    
-    private func playHapticPattern(events: [CHHapticEvent]) {
-        do {
-            let pattern = try CHHapticPattern(events: events, parameters: [])
-            let player = try engine?.makePlayer(with: pattern)
-            try player?.start(atTime: 0)
-            lastHapticTime = Date()
-        } catch {
-            print("Haptic error: \(error.localizedDescription)")
-        }
-    }
-}
-
-extension ViewController: ARSessionDelegate {
-    func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        depthManager.processDepth(frame)
+    private func handleGuidanceFeedback(currentTime: Date, proximity: Double) {
+        let minInterval = max(0.15, 0.3 - (proximity * 0.25))
+        guard currentTime.timeIntervalSince(lastHapticTime) > minInterval else { return }
+        hapticManager.playPattern(for: depthManager.status, proximity: proximity)
+        lastHapticTime = currentTime
     }
 }
